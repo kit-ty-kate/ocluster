@@ -1,0 +1,4 @@
+[submodule "obuilder"]
+	path = obuilder
+        branch = tmpfs
+	url = git://github.com/kit-ty-kate/obuilder.git
