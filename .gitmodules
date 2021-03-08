@@ -1,4 +1,4 @@
 [submodule "obuilder"]
 	path = obuilder
-        branch = concurrent-btrfs
+        branch = tmpfs2
 	url = git://github.com/kit-ty-kate/obuilder.git
