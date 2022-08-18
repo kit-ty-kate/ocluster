@@ -46,7 +46,7 @@ let buildkit_env =
   "DOCKER_BUILDKIT=1" :: orig |> Array.of_list
 
 let ( >>!= ) = Lwt_result.bind
-let ( // ) = Filename.concat
+let ( / ) = Filename.concat
 
 let docker_push_lock = Lwt_mutex.create ()
 
@@ -378,7 +378,7 @@ let check_contains ~path src =
         | x :: _ when Fpath.is_rel_seg x -> error_msg "Relative segment in %a" Fpath.pp path
         | "" :: _ -> error_msg "Empty segment in %a!" Fpath.pp path
         | x :: xs ->
-          let src = src // x in
+          let src = src / x in
           match Unix.lstat src with
           | Unix.{ st_kind = S_DIR; _ } -> aux ~src xs
           | Unix.{ st_kind = S_REG; _ } when xs = [] -> Ok src
@@ -409,7 +409,7 @@ let default_build ?obuilder ~switch ~log ~src ~secrets = function
          begin
            match dockerfile with
            | `Contents contents ->
-             let path = src // "Dockerfile" in
+             let path = src / "Dockerfile" in
              write_to_file ~path contents >>= fun () ->
              Lwt_result.return path
            | `Path "-" -> Lwt_result.fail (`Msg "Path cannot be '-'!")
@@ -523,8 +523,10 @@ let run ?switch ?build ?(allow_push=[]) ?prune_threshold ?obuilder ~update ~capa
   } in
   Lwt.async begin fun () ->
     let rec loop () =
+      let capacity = float_of_int (max 1 t.capacity) in
       (* Up to <capacity> jobs every minute sounds like a decent length of time to detect pressure *)
-      Lwt_unix.sleep (float_of_int (60 / t.capacity)) >>= fun () ->
+      (* If the capacity is < 10 it's probably a bit too slow so let's cap at 10 seconds max *)
+      Lwt_unix.sleep (min (60.0 /. capacity) 10.0) >>= fun () ->
       Lwt_condition.signal t.pressure_retry_cond ();
       loop ()
     in
