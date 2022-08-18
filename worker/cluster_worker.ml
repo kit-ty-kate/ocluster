@@ -46,7 +46,7 @@ let buildkit_env =
   "DOCKER_BUILDKIT=1" :: orig |> Array.of_list
 
 let ( >>!= ) = Lwt_result.bind
-let ( / ) = Filename.concat
+let ( // ) = Filename.concat
 
 let docker_push_lock = Lwt_mutex.create ()
 
@@ -86,6 +86,7 @@ type t = {
   mutable cancel : unit -> unit;       (* Called if switch is turned off *)
   allow_push : string list;            (* Repositories users can push to *)
   pressure : bool;                     (* true is /proc/pressure exists *)
+  pressure_retry_cond : unit Lwt_condition.t;
 }
 
 let docker_push ~switch ~log t hash { Cluster_api.Docker.Spec.target; auth } =
@@ -216,20 +217,16 @@ let maybe_wait t =
   match t.pressure with
   | false -> Lwt.return_unit
   | true ->
-    let rec cool_down ~threshold =
-      Lwt_unix.sleep 1.0 >>= fun () -> (* one new job accepted per second to allow load average to respond *)
+    let rec cool_down () =
+      Lwt_condition.wait t.pressure_retry_cond >>= fun () ->
       let cpu = get_pressure_some_avg10 ~kind:"cpu" in
       let io = get_pressure_some_avg10 ~kind:"io" in
       let mem = get_pressure_some_avg10 ~kind:"memory" in
       Log.info (fun f -> f "Pressure: cpu=%.2f io=%.2f memory=%.2f" cpu io mem);
-      if t.in_use = 0 || (cpu < threshold && io < threshold && mem < threshold) then Lwt.return_unit
-      else
-        let wait_until_a_job_finishes = Lwt_condition.wait t.cond >|= fun () -> 1.0 in
-        let timeout = Lwt_unix.sleep 60.0 >|= fun () -> 0.0 in (* Re-check pressure every minute in case it was a statistical anomaly *)
-        Lwt.pick [wait_until_a_job_finishes; timeout] >>= fun threshold ->
-        cool_down ~threshold
+      if t.in_use = 0 || (cpu < 0.1 && io < 1.0 && mem < 0.1) then Lwt.return_unit
+      else cool_down ()
     in
-    cool_down ~threshold:1.0
+    cool_down ()
 
 let rec maybe_prune t queue =
   check_docker_partition t >>= function
@@ -381,7 +378,7 @@ let check_contains ~path src =
         | x :: _ when Fpath.is_rel_seg x -> error_msg "Relative segment in %a" Fpath.pp path
         | "" :: _ -> error_msg "Empty segment in %a!" Fpath.pp path
         | x :: xs ->
-          let src = src / x in
+          let src = src // x in
           match Unix.lstat src with
           | Unix.{ st_kind = S_DIR; _ } -> aux ~src xs
           | Unix.{ st_kind = S_REG; _ } when xs = [] -> Ok src
@@ -412,7 +409,7 @@ let default_build ?obuilder ~switch ~log ~src ~secrets = function
          begin
            match dockerfile with
            | `Contents contents ->
-             let path = src / "Dockerfile" in
+             let path = src // "Dockerfile" in
              write_to_file ~path contents >>= fun () ->
              Lwt_result.return path
            | `Path "-" -> Lwt_result.fail (`Msg "Path cannot be '-'!")
@@ -522,7 +519,17 @@ let run ?switch ?build ?(allow_push=[]) ?prune_threshold ?obuilder ~update ~capa
     cancel = ignore;
     allow_push;
     pressure = Sys.file_exists "/proc/pressure"; (* For example, it does not exist on s390x *)
+    pressure_retry_cond = Lwt_condition.create ();
   } in
+  Lwt.async begin fun () ->
+    let rec loop () =
+      (* Up to <capacity> jobs every minute sounds like a decent length of time to detect pressure *)
+      Lwt_unix.sleep (float_of_int (60 / t.capacity)) >>= fun () ->
+      Lwt_condition.signal t.pressure_retry_cond ();
+      loop ()
+    in
+    loop ()
+  end;
   Lwt_switch.add_hook_or_exec switch (fun () ->
       Log.info (fun f -> f "Switch turned off. Will shut down.");
       t.cancel ();
