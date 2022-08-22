@@ -223,7 +223,7 @@ let maybe_wait t =
       let io = get_pressure_some_avg10 ~kind:"io" in
       let mem = get_pressure_some_avg10 ~kind:"memory" in
       Log.info (fun f -> f "Pressure: cpu=%.2f io=%.2f memory=%.2f" cpu io mem);
-      if t.in_use = 0 || (cpu < 0.01 && io < 0.01 && mem < 0.01) then Lwt.return_unit
+      if t.in_use = 0 || (cpu < 0.01 && io < 1.0 && mem < 0.01) then Lwt.return_unit
       else cool_down ()
     in
     cool_down ()
