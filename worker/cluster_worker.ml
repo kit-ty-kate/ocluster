@@ -223,7 +223,7 @@ let maybe_wait t =
       let io = get_pressure_some_avg10 ~kind:"io" in
       let mem = get_pressure_some_avg10 ~kind:"memory" in
       Log.info (fun f -> f "Pressure: cpu=%.2f io=%.2f memory=%.2f" cpu io mem);
-      if t.in_use = 0 || (cpu < 0.1 && io < 1.0 && mem < 0.1) then Lwt.return_unit
+      if t.in_use = 0 || (cpu < 0.01 && io < 0.01 && mem < 0.01) then Lwt.return_unit
       else cool_down ()
     in
     cool_down ()
@@ -523,10 +523,9 @@ let run ?switch ?build ?(allow_push=[]) ?prune_threshold ?obuilder ~update ~capa
   } in
   Lwt.async begin fun () ->
     let rec loop () =
-      let capacity = float_of_int (max 1 t.capacity) in
-      (* Up to <capacity> jobs every minute sounds like a decent length of time to detect pressure *)
-      (* If the capacity is < 10 it's probably a bit too slow so let's cap at 10 seconds max *)
-      Lwt_unix.sleep (min (60.0 /. capacity) 10.0) >>= fun () ->
+      (* /proc/pressure/ is only updated every 2 seconds so let's wait 2.1 seconds to check it again *)
+      (* See https://lwn.net/ml/cgroups/20180712172942.10094-9-hannes@cmpxchg.org/ *)
+      Lwt_unix.sleep 2.1 >>= fun () ->
       Lwt_condition.signal t.pressure_retry_cond ();
       loop ()
     in
