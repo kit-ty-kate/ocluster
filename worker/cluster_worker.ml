@@ -91,7 +91,6 @@ type t = {
   cond : unit Lwt_condition.t;         (* Fires when a build finishes (or switch turned off) *)
   mutable cancel : unit -> unit;       (* Called if switch is turned off *)
   allow_push : string list;            (* Repositories users can push to *)
-  pressure : bool;                     (* true is /proc/pressure exists *)
   pressure_barriere : pressure Lwt_condition.t;
 }
 
@@ -219,12 +218,31 @@ let get_pressure_some_avg10 ~kind =
   | Not_found ->
     Log.warn (fun f -> f "Pressure: Could not find avg10."); 0.0
 
-let maybe_wait t =
-  match t.pressure with
-  | false -> Lwt.return_unit
-  | true ->
-      Lwt_condition.wait t.pressure_barriere >|= fun {cpu; io; mem} ->
-      Log.info (fun f -> f "Pressure after barriere: cpu=%.2f io=%.2f memory=%.2f" cpu io mem)
+let wait_for_low_pressure t =
+  Lwt_condition.wait t.pressure_barriere >|= fun {cpu; io; mem} ->
+  Log.info (fun f -> f "Pressure after barriere: cpu=%.2f io=%.2f memory=%.2f" cpu io mem)
+
+let setup_pressure_barriere t =
+  let pressure_exists = Sys.file_exists "/proc/pressure" in (* For example, it does not exist on s390x *)
+  Lwt.async begin fun () ->
+    let rec loop () =
+      (* /proc/pressure/ is only updated every 2 seconds so let's wait 2.1 seconds to check it again *)
+      (* See https://lwn.net/ml/cgroups/20180712172942.10094-9-hannes@cmpxchg.org/ *)
+      Lwt_unix.sleep 2.1 >>= fun () ->
+      if pressure_exists then begin
+        let cpu = get_pressure_some_avg10 ~kind:"cpu" in
+        let io = get_pressure_some_avg10 ~kind:"io" in
+        let mem = get_pressure_some_avg10 ~kind:"memory" in
+        if t.in_use = 0 || (cpu < 0.01 && io < 1.0 && mem < 0.01) then begin
+          Lwt_condition.signal t.pressure_barriere {cpu; io; mem}
+        end else begin
+          Log.info (fun f -> f "Pressure before barriere: cpu=%.2f io=%.2f memory=%.2f" cpu io mem)
+        end
+      end;
+      loop ()
+    in
+    loop ()
+  end
 
 let rec maybe_prune t queue =
   check_docker_partition t >>= function
@@ -308,7 +326,7 @@ let loop ~switch ?obuilder t queue =
         Log.info (fun f -> f "At capacity. Waiting for a build to finish before requesting more...");
         Lwt_condition.wait t.cond >>= loop
       ) else (
-        maybe_wait t >>= fun () ->
+        wait_for_low_pressure t >>= fun () ->
         maybe_prune t queue >>= fun () ->
         check_health ~last_healthcheck ~queue obuilder >>= fun () ->
         let outcome, set_outcome = Lwt.wait () in
@@ -516,26 +534,9 @@ let run ?switch ?build ?(allow_push=[]) ?prune_threshold ?obuilder ~update ~capa
     in_use = 0;
     cancel = ignore;
     allow_push;
-    pressure = Sys.file_exists "/proc/pressure"; (* For example, it does not exist on s390x *)
     pressure_barriere = Lwt_condition.create ();
   } in
-  Lwt.async begin fun () ->
-    let rec loop () =
-      (* /proc/pressure/ is only updated every 2 seconds so let's wait 2.1 seconds to check it again *)
-      (* See https://lwn.net/ml/cgroups/20180712172942.10094-9-hannes@cmpxchg.org/ *)
-      Lwt_unix.sleep 2.1 >>= fun () ->
-      let cpu = get_pressure_some_avg10 ~kind:"cpu" in
-      let io = get_pressure_some_avg10 ~kind:"io" in
-      let mem = get_pressure_some_avg10 ~kind:"memory" in
-      if t.in_use = 0 || (cpu < 0.01 && io < 1.0 && mem < 0.01) then begin
-        Lwt_condition.signal t.pressure_barriere {cpu; io; mem}
-      end else begin
-        Log.info (fun f -> f "Pressure before barriere: cpu=%.2f io=%.2f memory=%.2f" cpu io mem)
-      end;
-      loop ()
-    in
-    loop ()
-  end;
+  setup_pressure_barriere t;
   Lwt_switch.add_hook_or_exec switch (fun () ->
       Log.info (fun f -> f "Switch turned off. Will shut down.");
       t.cancel ();
