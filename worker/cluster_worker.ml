@@ -225,23 +225,34 @@ let wait_for_low_pressure t =
 let setup_pressure_barrier t =
   let pressure_exists = Sys.file_exists "/proc/pressure" in (* For example, it does not exist on s390x *)
   Lwt.async begin fun () ->
-    let rec loop () =
-      (* /proc/pressure/ is only updated every 2 seconds so let's wait 2.1 seconds to check it again *)
+    let rec loop ({cpu = prev_cpu; io = prev_io; mem = prev_mem} as prev_pressure) =
+      (* avg10 in /proc/pressure/ is only updated every 2 seconds *)
       (* See https://lwn.net/ml/cgroups/20180712172942.10094-9-hannes@cmpxchg.org/ *)
       Lwt_unix.sleep 2.1 >>= fun () ->
-      if pressure_exists then begin
-        let cpu = get_pressure_some_avg10 ~kind:"cpu" in
-        let io = get_pressure_some_avg10 ~kind:"io" in
-        let mem = get_pressure_some_avg10 ~kind:"memory" in
-        if t.in_use = 0 || (cpu < 0.1 && io < 1.0 && mem < 0.01) then begin
-          Lwt_condition.signal t.pressure_barrier {cpu; io; mem}
-        end else begin
-          Log.info (fun f -> f "Pressure before barrier: cpu=%.2f io=%.2f memory=%.2f" cpu io mem)
-        end
-      end;
-      loop ()
+      let pressure =
+        if pressure_exists then
+          let cpu = get_pressure_some_avg10 ~kind:"cpu" in
+          let io = get_pressure_some_avg10 ~kind:"io" in
+          let mem = get_pressure_some_avg10 ~kind:"memory" in
+          let pressure = {cpu; io; mem} in
+          let rapidly_increasing =
+            (* is increasing more than 0.1% every 2 seconds *)
+            cpu > prev_cpu +. 0.1 ||
+            io > prev_io +. 0.1 ||
+            mem > prev_mem +. 0.1
+          in
+          if t.in_use = 0 || (cpu < 1.0 && io < 10.0 && mem < 0.01 && not rapidly_increasing) then begin
+            Lwt_condition.signal t.pressure_barrier pressure
+          end else begin
+            Log.info (fun f -> f "Pressure before barrier: cpu=%.2f io=%.2f memory=%.2f" cpu io mem)
+          end;
+          pressure
+        else
+          prev_pressure
+      in
+      loop pressure
     in
-    loop ()
+    loop {cpu = 0.0; io = 0.0; mem = 0.0}
   end
 
 let rec maybe_prune t queue =
