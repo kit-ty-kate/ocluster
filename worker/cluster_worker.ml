@@ -192,12 +192,16 @@ let check_docker_partition t =
     if free < prune_threshold then Error `Disk_space_low
     else Ok ()
 
-let get_pressure_some_avg10 ~kind =
+let num_zero = Num.num_of_string "0"
+let num_one = Num.num_of_string "1"
+let num_one_million = Num.num_of_string "1000000"
+
+let get_pressure_some_total ~kind =
   let rec read_line = function
     | [] -> raise Not_found
     | binding::rest ->
       match String.split_on_char '=' binding with
-      | ["avg10"; pressure] -> float_of_string pressure
+      | ["total"; pressure] -> Num.num_of_string pressure
       | [_; _] -> read_line rest
       | _ -> raise (Failure "")
   in
@@ -211,13 +215,13 @@ let get_pressure_some_avg10 ~kind =
     Fun.protect ~finally:(fun () -> close_in ic) (fun () -> read_lines ic)
   with
   | Sys_error _ ->
-    Log.warn (fun f -> f "Pressure: Could not open the pressure file for '%s'." kind); 0.0
+    Log.warn (fun f -> f "Pressure: Could not open the pressure file for '%s'." kind); num_zero
   | End_of_file ->
-    Log.warn (fun f -> f "Pressure: Could not get the 'some' line."); 0.0
+    Log.warn (fun f -> f "Pressure: Could not get the 'some' line."); num_zero
   | Failure _ -> (* raised manually or by float_of_string *)
-    Log.warn (fun f -> f "Pressure: Could not parse file."); 0.0
+    Log.warn (fun f -> f "Pressure: Could not parse file."); num_zero
   | Not_found ->
-    Log.warn (fun f -> f "Pressure: Could not find avg10."); 0.0
+    Log.warn (fun f -> f "Pressure: Could not find avg10."); num_zero
 
 let maybe_wait t =
   match t.pressure with
@@ -521,12 +525,28 @@ let run ?switch ?build ?(allow_push=[]) ?prune_threshold ?obuilder ~update ~capa
   } in
   Lwt.async begin fun () ->
     let rec loop () =
-      (* /proc/pressure/ is only updated every 2 seconds so let's wait 2.1 seconds to check it again *)
-      (* See https://lwn.net/ml/cgroups/20180712172942.10094-9-hannes@cmpxchg.org/ *)
-      Lwt_unix.sleep 2.1 >>= fun () ->
-      let cpu = get_pressure_some_avg10 ~kind:"cpu" in
-      let io = get_pressure_some_avg10 ~kind:"io" in
-      let mem = get_pressure_some_avg10 ~kind:"memory" in
+      let sleep_duration = num_one in
+      let delta_percent ~num1 ~num2 =
+        100.0 *. begin
+          float_of_string @@
+          Num.approx_num_fix 4 @@
+          Num.min_num num_one @@
+          Num.div_num
+            (Num.sub_num num2 num1)
+            (Num.mult_num sleep_duration num_one_million)
+        end
+      in
+      Lwt_unix.sleep (Num.float_of_num sleep_duration) >>= fun () ->
+      let cpu1 = get_pressure_some_total ~kind:"cpu" in
+      let io1 = get_pressure_some_total ~kind:"io" in
+      let mem1 = get_pressure_some_total ~kind:"memory" in
+      Lwt_unix.sleep (Num.float_of_num sleep_duration) >>= fun () ->
+      let cpu2 = get_pressure_some_total ~kind:"cpu" in
+      let io2 = get_pressure_some_total ~kind:"io" in
+      let mem2 = get_pressure_some_total ~kind:"memory" in
+      let cpu = delta_percent ~num1:cpu1 ~num2:cpu2 in
+      let io = delta_percent ~num1:io1 ~num2:io2 in
+      let mem = delta_percent ~num1:mem1 ~num2:mem2 in
       if t.in_use = 0 || (cpu < 0.01 && io < 1.0 && mem < 0.01) then begin
         Lwt_condition.signal t.pressure_barriere {cpu; io; mem}
       end else begin
