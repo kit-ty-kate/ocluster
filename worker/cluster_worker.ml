@@ -91,7 +91,7 @@ type t = {
   cond : unit Lwt_condition.t;         (* Fires when a build finishes (or switch turned off) *)
   mutable cancel : unit -> unit;       (* Called if switch is turned off *)
   allow_push : string list;            (* Repositories users can push to *)
-  pressure_barriere : pressure Lwt_condition.t;
+  pressure_barrier : pressure Lwt_condition.t;
 }
 
 let docker_push ~switch ~log t hash { Cluster_api.Docker.Spec.target; auth } =
@@ -219,10 +219,10 @@ let get_pressure_some_avg10 ~kind =
     Log.warn (fun f -> f "Pressure: Could not find avg10."); 0.0
 
 let wait_for_low_pressure t =
-  Lwt_condition.wait t.pressure_barriere >|= fun {cpu; io; mem} ->
-  Log.info (fun f -> f "Pressure after barriere: cpu=%.2f io=%.2f memory=%.2f" cpu io mem)
+  Lwt_condition.wait t.pressure_barrier >|= fun {cpu; io; mem} ->
+  Log.info (fun f -> f "Pressure after barrier: cpu=%.2f io=%.2f memory=%.2f" cpu io mem)
 
-let setup_pressure_barriere t =
+let setup_pressure_barrier t =
   let pressure_exists = Sys.file_exists "/proc/pressure" in (* For example, it does not exist on s390x *)
   Lwt.async begin fun () ->
     let rec loop () =
@@ -234,9 +234,9 @@ let setup_pressure_barriere t =
         let io = get_pressure_some_avg10 ~kind:"io" in
         let mem = get_pressure_some_avg10 ~kind:"memory" in
         if t.in_use = 0 || (cpu < 0.1 && io < 1.0 && mem < 0.01) then begin
-          Lwt_condition.signal t.pressure_barriere {cpu; io; mem}
+          Lwt_condition.signal t.pressure_barrier {cpu; io; mem}
         end else begin
-          Log.info (fun f -> f "Pressure before barriere: cpu=%.2f io=%.2f memory=%.2f" cpu io mem)
+          Log.info (fun f -> f "Pressure before barrier: cpu=%.2f io=%.2f memory=%.2f" cpu io mem)
         end
       end;
       loop ()
@@ -534,9 +534,9 @@ let run ?switch ?build ?(allow_push=[]) ?prune_threshold ?obuilder ~update ~capa
     in_use = 0;
     cancel = ignore;
     allow_push;
-    pressure_barriere = Lwt_condition.create ();
+    pressure_barrier = Lwt_condition.create ();
   } in
-  setup_pressure_barriere t;
+  setup_pressure_barrier t;
   Lwt_switch.add_hook_or_exec switch (fun () ->
       Log.info (fun f -> f "Switch turned off. Will shut down.");
       t.cancel ();
