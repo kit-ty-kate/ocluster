@@ -74,6 +74,12 @@ type build =
   job_spec ->
   (string, [`Cancelled | `Msg of string]) Lwt_result.t
 
+type pressure = {
+  cpu : float;
+  io : float;
+  mem : float;
+}
+
 type t = {
   name : string;
   context : Context.t;
@@ -86,7 +92,7 @@ type t = {
   mutable cancel : unit -> unit;       (* Called if switch is turned off *)
   allow_push : string list;            (* Repositories users can push to *)
   pressure : bool;                     (* true is /proc/pressure exists *)
-  pressure_retry_cond : unit Lwt_condition.t;
+  pressure_barriere : pressure Lwt_condition.t;
 }
 
 let docker_push ~switch ~log t hash { Cluster_api.Docker.Spec.target; auth } =
@@ -217,16 +223,8 @@ let maybe_wait t =
   match t.pressure with
   | false -> Lwt.return_unit
   | true ->
-    let rec cool_down () =
-      Lwt_condition.wait t.pressure_retry_cond >>= fun () ->
-      let cpu = get_pressure_some_avg10 ~kind:"cpu" in
-      let io = get_pressure_some_avg10 ~kind:"io" in
-      let mem = get_pressure_some_avg10 ~kind:"memory" in
-      Log.info (fun f -> f "Pressure: cpu=%.2f io=%.2f memory=%.2f" cpu io mem);
-      if t.in_use = 0 || (cpu < 0.01 && io < 1.0 && mem < 0.01) then Lwt.return_unit
-      else cool_down ()
-    in
-    cool_down ()
+      Lwt_condition.wait t.pressure_barriere >|= fun {cpu; io; mem} ->
+      Log.info (fun f -> f "Pressure after barriere: cpu=%.2f io=%.2f memory=%.2f" cpu io mem)
 
 let rec maybe_prune t queue =
   check_docker_partition t >>= function
@@ -519,14 +517,21 @@ let run ?switch ?build ?(allow_push=[]) ?prune_threshold ?obuilder ~update ~capa
     cancel = ignore;
     allow_push;
     pressure = Sys.file_exists "/proc/pressure"; (* For example, it does not exist on s390x *)
-    pressure_retry_cond = Lwt_condition.create ();
+    pressure_barriere = Lwt_condition.create ();
   } in
   Lwt.async begin fun () ->
     let rec loop () =
       (* /proc/pressure/ is only updated every 2 seconds so let's wait 2.1 seconds to check it again *)
       (* See https://lwn.net/ml/cgroups/20180712172942.10094-9-hannes@cmpxchg.org/ *)
       Lwt_unix.sleep 2.1 >>= fun () ->
-      Lwt_condition.signal t.pressure_retry_cond ();
+      let cpu = get_pressure_some_avg10 ~kind:"cpu" in
+      let io = get_pressure_some_avg10 ~kind:"io" in
+      let mem = get_pressure_some_avg10 ~kind:"memory" in
+      if t.in_use = 0 || (cpu < 0.01 && io < 1.0 && mem < 0.01) then begin
+        Lwt_condition.signal t.pressure_barriere {cpu; io; mem}
+      end else begin
+        Log.info (fun f -> f "Pressure before barriere: cpu=%.2f io=%.2f memory=%.2f" cpu io mem)
+      end;
       loop ()
     in
     loop ()
