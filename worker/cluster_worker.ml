@@ -233,7 +233,7 @@ let setup_pressure_barriere t =
         let cpu = get_pressure_some_avg10 ~kind:"cpu" in
         let io = get_pressure_some_avg10 ~kind:"io" in
         let mem = get_pressure_some_avg10 ~kind:"memory" in
-        if t.in_use = 0 || (cpu < 0.01 && io < 1.0 && mem < 0.01) then begin
+        if t.in_use = 0 || (cpu < 0.1 && io < 1.0 && mem < 0.01) then begin
           Lwt_condition.signal t.pressure_barriere {cpu; io; mem}
         end else begin
           Log.info (fun f -> f "Pressure before barriere: cpu=%.2f io=%.2f memory=%.2f" cpu io mem)
