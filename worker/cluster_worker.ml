@@ -241,10 +241,13 @@ let setup_pressure_barrier t =
             io > prev_io +. 0.1 ||
             mem > prev_mem +. 0.1
           in
-          if t.in_use = 0 || (cpu < 1.0 && io < 10.0 && mem < 0.01 && not rapidly_increasing) then begin
-            Lwt_condition.signal t.pressure_barrier pressure
-          end else begin
-            Log.info (fun f -> f "Pressure before barrier: cpu=%.2f io=%.2f memory=%.2f" cpu io mem)
+          begin
+            if cpu < 1.0 && io < 10.0 && mem < 0.01 && not rapidly_increasing then
+              Lwt_condition.signal t.pressure_barrier pressure
+            else if t.in_use = 0 then
+              Log.warn (fun f -> f "Pressure is high but no jobs are running...")
+            else
+              Log.info (fun f -> f "Pressure before barrier: cpu=%.2f io=%.2f memory=%.2f" cpu io mem)
           end;
           pressure
         else
