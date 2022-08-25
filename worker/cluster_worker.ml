@@ -228,7 +228,12 @@ let setup_pressure_barrier t =
     let rec loop ({cpu = prev_cpu; io = prev_io; mem = prev_mem} as prev_pressure) =
       (* avg10 in /proc/pressure/ is only updated every 2 seconds *)
       (* See https://lwn.net/ml/cgroups/20180712172942.10094-9-hannes@cmpxchg.org/ *)
-      Lwt_unix.sleep 2.1 >>= fun () ->
+      begin
+        if prev_cpu < 0.01 && prev_io < 0.01 && prev_mem < 0.01 then
+          Lwt_unix.sleep 0.1
+        else
+          Lwt_unix.sleep 2.1
+      end >>= fun () ->
       let pressure =
         if pressure_exists then
           let cpu = get_pressure_some_avg10 ~kind:"cpu" in
