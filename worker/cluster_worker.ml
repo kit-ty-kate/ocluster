@@ -223,9 +223,6 @@ let wait_for_low_pressure t =
   Log.info (fun f -> f "Pressure after barrier: cpu=%.2f io=%.2f memory=%.2f" cpu io mem)
 
 let setup_pressure_barrier t =
-  let num_one = Num.num_of_string "1" in
-  let num_ten = Num.num_of_string "10" in
-  let num_one_million = Num.num_of_string "1000000" in
   let pressure_exists = Sys.file_exists "/proc/pressure" in (* For example, it does not exist on s390x *)
   Lwt.async begin fun () ->
     let barrier ~prev:{cpu = prev_cpu; io = prev_io; mem = prev_mem} ({cpu; io; mem} as pressure) =
@@ -250,26 +247,23 @@ let setup_pressure_barrier t =
         Lwt_condition.signal t.pressure_barrier prev_pressure;
         loop prev_pressure
       else if prev_cpu < 0.01 && prev_io < 0.01 && prev_mem < 0.01 then
-        let sleep_duration = Num.div_num num_one num_ten in (* 0.1s *)
-        Lwt_unix.sleep (Num.float_of_num sleep_duration) >>= fun () ->
+        let sleep_duration = 0.1 in
+        Lwt_unix.sleep sleep_duration >>= fun () ->
         let delta_percent ~num1 ~num2 =
           100.0 *. begin
-            float_of_string @@
-            Num.approx_num_fix 4 @@ (* Max precision of avg10 is 2 (in percent) *)
-            Num.min_num num_one @@
-            Num.div_num
-              (Num.sub_num num2 num1)
-              (Num.mult_num sleep_duration num_one_million)
+            min 1.0 @@
+            (Int64.to_float (Int64.sub num2 num1)) /.
+            (sleep_duration *. 1_000_000.0) (* total is counted in μs *)
           end
         in
-        Lwt_unix.sleep (Num.float_of_num sleep_duration) >>= fun () ->
-        let cpu1 = Num.num_of_string (get_pressure_some ~field:"total" ~kind:"cpu") in
-        let io1 = Num.num_of_string (get_pressure_some ~field:"total" ~kind:"io") in
-        let mem1 = Num.num_of_string (get_pressure_some ~field:"total" ~kind:"memory") in
-        Lwt_unix.sleep (Num.float_of_num sleep_duration) >>= fun () ->
-        let cpu2 = Num.num_of_string (get_pressure_some ~field:"total" ~kind:"cpu") in
-        let io2 = Num.num_of_string (get_pressure_some ~field:"total" ~kind:"io") in
-        let mem2 = Num.num_of_string (get_pressure_some ~field:"total" ~kind:"memory") in
+        Lwt_unix.sleep sleep_duration >>= fun () ->
+        let cpu1 = Int64.of_string (get_pressure_some ~field:"total" ~kind:"cpu") in
+        let io1 = Int64.of_string (get_pressure_some ~field:"total" ~kind:"io") in
+        let mem1 = Int64.of_string (get_pressure_some ~field:"total" ~kind:"memory") in
+        Lwt_unix.sleep sleep_duration >>= fun () ->
+        let cpu2 = Int64.of_string (get_pressure_some ~field:"total" ~kind:"cpu") in
+        let io2 = Int64.of_string (get_pressure_some ~field:"total" ~kind:"io") in
+        let mem2 = Int64.of_string (get_pressure_some ~field:"total" ~kind:"memory") in
         let cpu = delta_percent ~num1:cpu1 ~num2:cpu2 in
         let io = delta_percent ~num1:io1 ~num2:io2 in
         let mem = delta_percent ~num1:mem1 ~num2:mem2 in

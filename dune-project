@@ -45,7 +45,6 @@
   sqlite3
   obuilder
   psq
-  num
   (mirage-crypto (>= 0.8.5))
   (ocaml (>= 4.12.0))
   (current_ocluster (and (= :version) :with-test))
