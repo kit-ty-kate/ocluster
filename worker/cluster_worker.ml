@@ -196,7 +196,7 @@ let get_pressure_some ~field ~kind =
     | [] -> raise Not_found
     | binding::rest ->
       match String.split_on_char '=' binding with
-      | [cur_field; pressure] when String.equal field cur_field -> float_of_string pressure
+      | [cur_field; pressure] when String.equal field cur_field -> pressure
       | [_; _] -> read_line rest
       | _ -> raise (Failure "")
   in
@@ -210,55 +210,80 @@ let get_pressure_some ~field ~kind =
     Fun.protect ~finally:(fun () -> close_in ic) (fun () -> read_lines ic)
   with
   | Sys_error _ ->
-    Log.warn (fun f -> f "Pressure: Could not open the pressure file for '%s'." kind); 0.0
+    Log.warn (fun f -> f "Pressure: Could not open the pressure file for '%s'." kind); "0"
   | End_of_file ->
-    Log.warn (fun f -> f "Pressure: Could not get the 'some' line."); 0.0
+    Log.warn (fun f -> f "Pressure: Could not get the 'some' line."); "0"
   | Failure _ -> (* raised manually or by float_of_string *)
-    Log.warn (fun f -> f "Pressure: Could not parse file."); 0.0
+    Log.warn (fun f -> f "Pressure: Could not parse file."); "0"
   | Not_found ->
-    Log.warn (fun f -> f "Pressure: Could not find avg10."); 0.0
+    Log.warn (fun f -> f "Pressure: Could not find avg10."); "0"
 
 let wait_for_low_pressure t =
   Lwt_condition.wait t.pressure_barrier >|= fun {cpu; io; mem} ->
   Log.info (fun f -> f "Pressure after barrier: cpu=%.2f io=%.2f memory=%.2f" cpu io mem)
 
 let setup_pressure_barrier t =
+  let num_one = Num.num_of_string "1" in
+  let num_ten = Num.num_of_string "10" in
+  let num_one_million = Num.num_of_string "1000000" in
   let pressure_exists = Sys.file_exists "/proc/pressure" in (* For example, it does not exist on s390x *)
   Lwt.async begin fun () ->
+    let barrier ~prev:{cpu = prev_cpu; io = prev_io; mem = prev_mem} ({cpu; io; mem} as pressure) =
+      let rapidly_increasing =
+        (* is increasing more than 0.1% every 2 seconds *)
+        cpu > prev_cpu +. 0.1 ||
+        io > prev_io +. 0.1 ||
+        mem > prev_mem +. 0.1
+      in
+      if cpu < 1.0 && io < 10.0 && mem < 0.01 && not rapidly_increasing then
+        Lwt_condition.signal t.pressure_barrier pressure
+      else if t.in_use = 0 then
+        Log.warn (fun f -> f "Pressure is high but no jobs are running...")
+      else
+        Log.info (fun f -> f "Pressure before barrier: cpu=%.2f io=%.2f memory=%.2f" cpu io mem)
+    in
     let rec loop ({cpu = prev_cpu; io = prev_io; mem = prev_mem} as prev_pressure) =
       (* avg10 in /proc/pressure/ is only updated every 2 seconds *)
       (* See https://lwn.net/ml/cgroups/20180712172942.10094-9-hannes@cmpxchg.org/ *)
-      begin
-        if prev_cpu < 0.01 && prev_io < 0.01 && prev_mem < 0.01 then
-          Lwt_unix.sleep 0.1
-        else
-          Lwt_unix.sleep 2.1
-      end >>= fun () ->
-      let pressure =
-        if pressure_exists then
-          let cpu = get_pressure_some ~field:"avg10" ~kind:"cpu" in
-          let io = get_pressure_some ~field:"avg10" ~kind:"io" in
-          let mem = get_pressure_some ~field:"avg10" ~kind:"memory" in
-          let pressure = {cpu; io; mem} in
-          let rapidly_increasing =
-            (* is increasing more than 0.1% every 2 seconds *)
-            cpu > prev_cpu +. 0.1 ||
-            io > prev_io +. 0.1 ||
-            mem > prev_mem +. 0.1
-          in
-          begin
-            if cpu < 1.0 && io < 10.0 && mem < 0.01 && not rapidly_increasing then
-              Lwt_condition.signal t.pressure_barrier pressure
-            else if t.in_use = 0 then
-              Log.warn (fun f -> f "Pressure is high but no jobs are running...")
-            else
-              Log.info (fun f -> f "Pressure before barrier: cpu=%.2f io=%.2f memory=%.2f" cpu io mem)
-          end;
-          pressure
-        else
-          prev_pressure
-      in
-      loop pressure
+      if not pressure_exists then
+        Lwt_unix.sleep 0.1 >>= fun () ->
+        Lwt_condition.signal t.pressure_barrier prev_pressure;
+        loop prev_pressure
+      else if prev_cpu < 0.01 && prev_io < 0.01 && prev_mem < 0.01 then
+        let sleep_duration = Num.div_num num_one num_ten in (* 0.1s *)
+        Lwt_unix.sleep (Num.float_of_num sleep_duration) >>= fun () ->
+        let delta_percent ~num1 ~num2 =
+          100.0 *. begin
+            float_of_string @@
+            Num.approx_num_fix 4 @@ (* Max precision of avg10 is 2 (in percent) *)
+            Num.min_num num_one @@
+            Num.div_num
+              (Num.sub_num num2 num1)
+              (Num.mult_num sleep_duration num_one_million)
+          end
+        in
+        Lwt_unix.sleep (Num.float_of_num sleep_duration) >>= fun () ->
+        let cpu1 = Num.num_of_string (get_pressure_some ~field:"total" ~kind:"cpu") in
+        let io1 = Num.num_of_string (get_pressure_some ~field:"total" ~kind:"io") in
+        let mem1 = Num.num_of_string (get_pressure_some ~field:"total" ~kind:"memory") in
+        Lwt_unix.sleep (Num.float_of_num sleep_duration) >>= fun () ->
+        let cpu2 = Num.num_of_string (get_pressure_some ~field:"total" ~kind:"cpu") in
+        let io2 = Num.num_of_string (get_pressure_some ~field:"total" ~kind:"io") in
+        let mem2 = Num.num_of_string (get_pressure_some ~field:"total" ~kind:"memory") in
+        let cpu = delta_percent ~num1:cpu1 ~num2:cpu2 in
+        let io = delta_percent ~num1:io1 ~num2:io2 in
+        let mem = delta_percent ~num1:mem1 ~num2:mem2 in
+        let pressure = {cpu; io; mem} in
+        barrier ~prev:prev_pressure pressure;
+        loop pressure
+      else
+        Lwt_unix.sleep 2.1 >>= fun () ->
+        let cpu = float_of_string (get_pressure_some ~field:"avg10" ~kind:"cpu") in
+        let io = float_of_string (get_pressure_some ~field:"avg10" ~kind:"io") in
+        let mem = float_of_string (get_pressure_some ~field:"avg10" ~kind:"memory") in
+        let pressure = {cpu; io; mem} in
+        barrier ~prev:prev_pressure pressure;
+        loop pressure
     in
     loop {cpu = 0.0; io = 0.0; mem = 0.0}
   end
