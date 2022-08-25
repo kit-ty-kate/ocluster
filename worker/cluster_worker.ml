@@ -191,12 +191,12 @@ let check_docker_partition t =
     if free < prune_threshold then Error `Disk_space_low
     else Ok ()
 
-let get_pressure_some_avg10 ~kind =
+let get_pressure_some ~field ~kind =
   let rec read_line = function
     | [] -> raise Not_found
     | binding::rest ->
       match String.split_on_char '=' binding with
-      | ["avg10"; pressure] -> float_of_string pressure
+      | [cur_field; pressure] when String.equal field cur_field -> float_of_string pressure
       | [_; _] -> read_line rest
       | _ -> raise (Failure "")
   in
@@ -236,9 +236,9 @@ let setup_pressure_barrier t =
       end >>= fun () ->
       let pressure =
         if pressure_exists then
-          let cpu = get_pressure_some_avg10 ~kind:"cpu" in
-          let io = get_pressure_some_avg10 ~kind:"io" in
-          let mem = get_pressure_some_avg10 ~kind:"memory" in
+          let cpu = get_pressure_some ~field:"avg10" ~kind:"cpu" in
+          let io = get_pressure_some ~field:"avg10" ~kind:"io" in
+          let mem = get_pressure_some ~field:"avg10" ~kind:"memory" in
           let pressure = {cpu; io; mem} in
           let rapidly_increasing =
             (* is increasing more than 0.1% every 2 seconds *)
