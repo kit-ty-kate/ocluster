@@ -273,7 +273,7 @@ let setup_pressure_barrier t =
       if t.pressure_barrier_stop then
         ()
       else if not pressure_exists then begin
-        Thread.delay 0.1;
+        Thread.delay sleep_duration;
         Lwt_condition.signal t.pressure_barrier None;
         loop prevs
       end else begin
