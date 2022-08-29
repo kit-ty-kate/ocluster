@@ -92,6 +92,7 @@ type t = {
   mutable cancel : unit -> unit;       (* Called if switch is turned off *)
   allow_push : string list;            (* Repositories users can push to *)
   pressure_barrier : pressure Lwt_condition.t;
+  mutable pressure_barrier_stop : bool;
 }
 
 let docker_push ~switch ~log t hash { Cluster_api.Docker.Spec.target; auth } =
@@ -224,7 +225,7 @@ let wait_for_low_pressure t =
 
 let setup_pressure_barrier t =
   let pressure_exists = Sys.file_exists "/proc/pressure" in (* For example, it does not exist on s390x *)
-  Lwt.async begin fun () ->
+  Thread.create begin fun () : unit ->
     let barrier ~prev:{cpu = prev_cpu; io = prev_io; mem = prev_mem} ({cpu; io; mem} as pressure) =
       let rapidly_increasing =
         (* is increasing more than 0.1% every 2 seconds *)
@@ -235,20 +236,20 @@ let setup_pressure_barrier t =
       if cpu < 1.0 && io < 10.0 && mem < 0.01 && not rapidly_increasing then
         Lwt_condition.signal t.pressure_barrier pressure
       else if t.in_use = 0 then
-        Log.warn (fun f -> f "Pressure is high but no jobs are running...")
+        Log.warn (fun f -> f "Pressure is high but no jobs are running... (cpu=%.2f io=%.2f memory=%.2f)" cpu io mem)
       else
         Log.info (fun f -> f "Pressure before barrier: cpu=%.2f io=%.2f memory=%.2f" cpu io mem)
     in
     let rec loop ({cpu = prev_cpu; io = prev_io; mem = prev_mem} as prev_pressure) =
-      (* avg10 in /proc/pressure/ is only updated every 2 seconds *)
-      (* See https://lwn.net/ml/cgroups/20180712172942.10094-9-hannes@cmpxchg.org/ *)
-      if not pressure_exists then
-        Lwt_unix.sleep 0.1 >>= fun () ->
+      if t.pressure_barrier_stop then
+        ()
+      else if not pressure_exists then begin
+        Thread.delay 0.1;
         Lwt_condition.signal t.pressure_barrier prev_pressure;
         loop prev_pressure
-      else if prev_cpu < 0.01 && prev_io < 0.01 && prev_mem < 0.01 then
+      end else if prev_cpu < 0.01 && prev_io < 0.01 && prev_mem < 0.01 then begin
         let sleep_duration = 0.1 in
-        Lwt_unix.sleep sleep_duration >>= fun () ->
+        Thread.delay sleep_duration;
         let delta_percent ~num1 ~num2 =
           100.0 *. begin
             min 1.0 @@
@@ -256,11 +257,11 @@ let setup_pressure_barrier t =
             (sleep_duration *. 1_000_000.0) (* total is counted in μs *)
           end
         in
-        Lwt_unix.sleep sleep_duration >>= fun () ->
+        Thread.delay sleep_duration;
         let cpu1 = Int64.of_string (get_pressure_some ~field:"total" ~kind:"cpu") in
         let io1 = Int64.of_string (get_pressure_some ~field:"total" ~kind:"io") in
         let mem1 = Int64.of_string (get_pressure_some ~field:"total" ~kind:"memory") in
-        Lwt_unix.sleep sleep_duration >>= fun () ->
+        Thread.delay sleep_duration;
         let cpu2 = Int64.of_string (get_pressure_some ~field:"total" ~kind:"cpu") in
         let io2 = Int64.of_string (get_pressure_some ~field:"total" ~kind:"io") in
         let mem2 = Int64.of_string (get_pressure_some ~field:"total" ~kind:"memory") in
@@ -270,17 +271,20 @@ let setup_pressure_barrier t =
         let pressure = {cpu; io; mem} in
         barrier ~prev:prev_pressure pressure;
         loop pressure
-      else
-        Lwt_unix.sleep 2.1 >>= fun () ->
+      end else begin
+        (* avg10 in /proc/pressure/ is only updated every 2 seconds *)
+        (* See https://lwn.net/ml/cgroups/20180712172942.10094-9-hannes@cmpxchg.org/ *)
+        Thread.delay 2.1;
         let cpu = float_of_string (get_pressure_some ~field:"avg10" ~kind:"cpu") in
         let io = float_of_string (get_pressure_some ~field:"avg10" ~kind:"io") in
         let mem = float_of_string (get_pressure_some ~field:"avg10" ~kind:"memory") in
         let pressure = {cpu; io; mem} in
         barrier ~prev:prev_pressure pressure;
         loop pressure
+      end
     in
     loop {cpu = 0.0; io = 0.0; mem = 0.0}
-  end
+  end ()
 
 let rec maybe_prune t queue =
   check_docker_partition t >>= function
@@ -573,8 +577,9 @@ let run ?switch ?build ?(allow_push=[]) ?prune_threshold ?obuilder ~update ~capa
     cancel = ignore;
     allow_push;
     pressure_barrier = Lwt_condition.create ();
+    pressure_barrier_stop = false;
   } in
-  setup_pressure_barrier t;
+  let pressure_barrier_thread = setup_pressure_barrier t in
   Lwt_switch.add_hook_or_exec switch (fun () ->
       Log.info (fun f -> f "Switch turned off. Will shut down.");
       t.cancel ();
@@ -614,8 +619,11 @@ let run ?switch ?build ?(allow_push=[]) ?prune_threshold ?obuilder ~update ~capa
          Lwt_unix.sleep delay >>= reconnect
       )
   in
-  reconnect () >>= function
+  reconnect () >>= begin function
   | `Cancelled -> Lwt.return_unit
   | `Crash ex -> Lwt.fail ex
+  end >|= fun () ->
+  t.pressure_barrier_stop <- true;
+  Thread.join pressure_barrier_thread
 
 module Obuilder_config = Obuilder_build.Config
