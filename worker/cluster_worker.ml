@@ -230,13 +230,12 @@ let wait_for_low_pressure t =
   Log.info (fun f -> f "Pressure after barrier: cpu=%.2f io=%.2f memory=%.2f" cpu.avg10 io.avg10 mem.avg10)
 
 (* TODO: Make it an external library? *)
-module Limited_dequeue : sig
+module Limited_queue : sig
   type 'a t
 
   val singleton : limit:int -> 'a -> 'a t
   val add : 'a -> 'a t -> 'a t
   val get : 'a t -> 'a
-  val last : 'a t -> 'a
 end = struct
   type 'a t = {limit : int; data : 'a list}
   let singleton ~limit x = {limit; data = [x]}
@@ -247,8 +246,6 @@ end = struct
       {limit; data = data @ [x]}
   let get self =
     List.hd self.data
-  let last self =
-    List.hd (List.rev self.data)
 end
 
 let setup_pressure_barrier t =
@@ -269,13 +266,13 @@ let setup_pressure_barrier t =
         Log.info (fun f -> f "Pressure before barrier: cpu=%.2f io=%.2f memory=%.2f" cpu.avg10 io.avg10 mem.avg10)
     in
     let sleep_duration = 0.1 in
-    let rec loop prevs =
+    let rec loop prevs prev =
       if t.pressure_barrier_stop then
         ()
       else if not pressure_exists then begin
         Thread.delay sleep_duration;
         Lwt_condition.signal t.pressure_barrier None;
-        loop prevs
+        loop prevs prev
       end else begin
         let delta_percent ~prev10 total =
           let time = Unix.gettimeofday () in
@@ -292,19 +289,19 @@ let setup_pressure_barrier t =
         let cpu_total = Int64.of_string (get_pressure_some ~field:"total" ~kind:"cpu") in
         let io_total = Int64.of_string (get_pressure_some ~field:"total" ~kind:"io") in
         let mem_total = Int64.of_string (get_pressure_some ~field:"total" ~kind:"memory") in
-        let prev10 = Limited_dequeue.get prevs in
+        let prev10 = Limited_queue.get prevs in
         let cpu = delta_percent ~prev10:prev10.cpu cpu_total in
         let io = delta_percent ~prev10:prev10.io io_total in
         let mem = delta_percent ~prev10:prev10.mem mem_total in
         let pressure = {cpu; io; mem} in
-        barrier ~prev:(Limited_dequeue.last prevs) pressure;
-        loop (Limited_dequeue.add pressure prevs)
+        barrier ~prev pressure;
+        loop (Limited_queue.add pressure prevs) pressure
       end
     in
     let default = {avg10 = 0.0; total = 0L; time = Unix.gettimeofday ()} in
     let default = {cpu = default; io = default; mem = default} in
     let limit = int_of_float (10.0 /. sleep_duration) in
-    loop (Limited_dequeue.singleton ~limit default)
+    loop (Limited_queue.singleton ~limit default) default
   end ()
 
 let rec maybe_prune t queue =
