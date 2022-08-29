@@ -97,7 +97,7 @@ type t = {
   cond : unit Lwt_condition.t;         (* Fires when a build finishes (or switch turned off) *)
   mutable cancel : unit -> unit;       (* Called if switch is turned off *)
   allow_push : string list;            (* Repositories users can push to *)
-  pressure_barrier : pressure Lwt_condition.t;
+  pressure_barrier : pressure option Lwt_condition.t;
   mutable pressure_barrier_stop : bool;
 }
 
@@ -226,7 +226,7 @@ let get_pressure_some ~field ~kind =
     Log.warn (fun f -> f "Pressure: Could not find avg10."); "0"
 
 let wait_for_low_pressure t =
-  Lwt_condition.wait t.pressure_barrier >|= fun {cpu; io; mem} ->
+  Lwt_condition.wait t.pressure_barrier >|= Option.iter @@ fun {cpu; io; mem} ->
   Log.info (fun f -> f "Pressure after barrier: cpu=%.2f io=%.2f memory=%.2f" cpu.avg10 io.avg10 mem.avg10)
 
 (* TODO: Make it an external library? *)
@@ -262,7 +262,7 @@ let setup_pressure_barrier t =
         mem.avg10 > prev_mem.avg10 +. 0.1
       in
       if cpu.avg10 < 1.0 && io.avg10 < 10.0 && mem.avg10 < 0.01 && not rapidly_increasing then
-        Lwt_condition.signal t.pressure_barrier pressure
+        Lwt_condition.signal t.pressure_barrier (Some pressure)
       else if t.in_use = 0 then
         Log.warn (fun f -> f "Pressure is high but no jobs are running... (cpu=%.2f io=%.2f memory=%.2f)" cpu.avg10 io.avg10 mem.avg10)
       else
@@ -274,7 +274,7 @@ let setup_pressure_barrier t =
         ()
       else if not pressure_exists then begin
         Thread.delay 0.1;
-        Lwt_condition.signal t.pressure_barrier (Limited_dequeue.get prevs);
+        Lwt_condition.signal t.pressure_barrier None;
         loop prevs
       end else begin
         let delta_percent ~prev10 total =
