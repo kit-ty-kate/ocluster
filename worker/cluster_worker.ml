@@ -249,7 +249,6 @@ let setup_pressure_barrier t =
         loop prev_pressure
       end else if prev_cpu < 0.01 && prev_io < 0.01 && prev_mem < 0.01 then begin
         let sleep_duration = 0.1 in
-        Thread.delay sleep_duration;
         let delta_percent ~num1 ~num2 =
           100.0 *. begin
             min 1.0 @@
