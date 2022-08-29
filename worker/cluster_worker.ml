@@ -274,8 +274,7 @@ let setup_pressure_barrier t =
         Lwt_condition.signal t.pressure_barrier None;
         loop prevs prev
       end else begin
-        let delta_percent ~prev10 total =
-          let time = Unix.gettimeofday () in
+        let delta_percent ~prev10 ~time total =
           let avg10 =
             100.0 *. begin
               min 1.0 @@
@@ -287,12 +286,15 @@ let setup_pressure_barrier t =
         in
         Thread.delay sleep_duration;
         let cpu_total = Int64.of_string (get_pressure_some ~field:"total" ~kind:"cpu") in
+        let cpu_time = Unix.gettimeofday () in
         let io_total = Int64.of_string (get_pressure_some ~field:"total" ~kind:"io") in
+        let io_time = Unix.gettimeofday () in
         let mem_total = Int64.of_string (get_pressure_some ~field:"total" ~kind:"memory") in
+        let mem_time = Unix.gettimeofday () in
         let prev10 = Limited_queue.get prevs in
-        let cpu = delta_percent ~prev10:prev10.cpu cpu_total in
-        let io = delta_percent ~prev10:prev10.io io_total in
-        let mem = delta_percent ~prev10:prev10.mem mem_total in
+        let cpu = delta_percent ~prev10:prev10.cpu ~time:cpu_time cpu_total in
+        let io = delta_percent ~prev10:prev10.io ~time:io_time io_total in
+        let mem = delta_percent ~prev10:prev10.mem ~time:mem_time mem_total in
         let pressure = {cpu; io; mem} in
         barrier ~prev pressure;
         loop (Limited_queue.add pressure prevs) pressure
