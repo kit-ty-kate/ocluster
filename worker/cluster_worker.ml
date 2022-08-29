@@ -74,10 +74,16 @@ type build =
   job_spec ->
   (string, [`Cancelled | `Msg of string]) Lwt_result.t
 
+type pressure_value = {
+  avg10 : float;
+  total : Int64.t;
+  time : float;
+}
+
 type pressure = {
-  cpu : float;
-  io : float;
-  mem : float;
+  cpu : pressure_value;
+  io : pressure_value;
+  mem : pressure_value;
 }
 
 type t = {
@@ -221,68 +227,84 @@ let get_pressure_some ~field ~kind =
 
 let wait_for_low_pressure t =
   Lwt_condition.wait t.pressure_barrier >|= fun {cpu; io; mem} ->
-  Log.info (fun f -> f "Pressure after barrier: cpu=%.2f io=%.2f memory=%.2f" cpu io mem)
+  Log.info (fun f -> f "Pressure after barrier: cpu=%.2f io=%.2f memory=%.2f" cpu.avg10 io.avg10 mem.avg10)
+
+(* TODO: Make it an external library? *)
+module Limited_dequeue : sig
+  type 'a t
+
+  val singleton : limit:int -> 'a -> 'a t
+  val add : 'a -> 'a t -> 'a t
+  val get : 'a t -> 'a
+  val last : 'a t -> 'a
+end = struct
+  type 'a t = {limit : int; data : 'a list}
+  let singleton ~limit x = {limit; data = [x]}
+  let add x {limit; data} =
+    if List.length data + 1 > limit then
+      {limit; data = List.tl data @ [x]}
+    else
+      {limit; data = data @ [x]}
+  let get self =
+    List.hd self.data
+  let last self =
+    List.hd (List.rev self.data)
+end
 
 let setup_pressure_barrier t =
   let pressure_exists = Sys.file_exists "/proc/pressure" in (* For example, it does not exist on s390x *)
   Thread.create begin fun () : unit ->
     let barrier ~prev:{cpu = prev_cpu; io = prev_io; mem = prev_mem} ({cpu; io; mem} as pressure) =
       let rapidly_increasing =
-        (* is increasing more than 0.1% every 2 seconds *)
-        cpu > prev_cpu +. 0.1 ||
-        io > prev_io +. 0.1 ||
-        mem > prev_mem +. 0.1
+        (* is increasing more than 0.1% *)
+        cpu.avg10 > prev_cpu.avg10 +. 0.1 ||
+        io.avg10 > prev_io.avg10 +. 0.1 ||
+        mem.avg10 > prev_mem.avg10 +. 0.1
       in
-      if cpu < 1.0 && io < 10.0 && mem < 0.01 && not rapidly_increasing then
+      if cpu.avg10 < 1.0 && io.avg10 < 10.0 && mem.avg10 < 0.01 && not rapidly_increasing then
         Lwt_condition.signal t.pressure_barrier pressure
       else if t.in_use = 0 then
-        Log.warn (fun f -> f "Pressure is high but no jobs are running... (cpu=%.2f io=%.2f memory=%.2f)" cpu io mem)
+        Log.warn (fun f -> f "Pressure is high but no jobs are running... (cpu=%.2f io=%.2f memory=%.2f)" cpu.avg10 io.avg10 mem.avg10)
       else
-        Log.info (fun f -> f "Pressure before barrier: cpu=%.2f io=%.2f memory=%.2f" cpu io mem)
+        Log.info (fun f -> f "Pressure before barrier: cpu=%.2f io=%.2f memory=%.2f" cpu.avg10 io.avg10 mem.avg10)
     in
-    let rec loop ({cpu = prev_cpu; io = prev_io; mem = prev_mem} as prev_pressure) =
+    let sleep_duration = 0.1 in
+    let rec loop prevs =
       if t.pressure_barrier_stop then
         ()
       else if not pressure_exists then begin
         Thread.delay 0.1;
-        Lwt_condition.signal t.pressure_barrier prev_pressure;
-        loop prev_pressure
-      end else if prev_cpu < 0.01 && prev_io < 0.01 && prev_mem < 0.01 then begin
-        let sleep_duration = 0.1 in
-        let delta_percent ~num1 ~num2 =
-          100.0 *. begin
-            min 1.0 @@
-            (Int64.to_float (Int64.sub num2 num1)) /.
-            (sleep_duration *. 1_000_000.0) (* total is counted in μs *)
-          end
+        Lwt_condition.signal t.pressure_barrier (Limited_dequeue.get prevs);
+        loop prevs
+      end else begin
+        let delta_percent ~prev10 total =
+          let time = Unix.gettimeofday () in
+          let avg10 =
+            100.0 *. begin
+              min 1.0 @@
+              (Int64.to_float (Int64.sub total prev10.total)) /.
+              ((time -. prev10.time) *. 1_000_000.0) (* total is counted in μs *)
+            end
+          in
+          {avg10; total; time}
         in
         Thread.delay sleep_duration;
-        let cpu1 = Int64.of_string (get_pressure_some ~field:"total" ~kind:"cpu") in
-        let io1 = Int64.of_string (get_pressure_some ~field:"total" ~kind:"io") in
-        let mem1 = Int64.of_string (get_pressure_some ~field:"total" ~kind:"memory") in
-        Thread.delay sleep_duration;
-        let cpu2 = Int64.of_string (get_pressure_some ~field:"total" ~kind:"cpu") in
-        let io2 = Int64.of_string (get_pressure_some ~field:"total" ~kind:"io") in
-        let mem2 = Int64.of_string (get_pressure_some ~field:"total" ~kind:"memory") in
-        let cpu = delta_percent ~num1:cpu1 ~num2:cpu2 in
-        let io = delta_percent ~num1:io1 ~num2:io2 in
-        let mem = delta_percent ~num1:mem1 ~num2:mem2 in
+        let cpu_total = Int64.of_string (get_pressure_some ~field:"total" ~kind:"cpu") in
+        let io_total = Int64.of_string (get_pressure_some ~field:"total" ~kind:"io") in
+        let mem_total = Int64.of_string (get_pressure_some ~field:"total" ~kind:"memory") in
+        let prev10 = Limited_dequeue.get prevs in
+        let cpu = delta_percent ~prev10:prev10.cpu cpu_total in
+        let io = delta_percent ~prev10:prev10.io io_total in
+        let mem = delta_percent ~prev10:prev10.mem mem_total in
         let pressure = {cpu; io; mem} in
-        barrier ~prev:prev_pressure pressure;
-        loop pressure
-      end else begin
-        (* avg10 in /proc/pressure/ is only updated every 2 seconds *)
-        (* See https://lwn.net/ml/cgroups/20180712172942.10094-9-hannes@cmpxchg.org/ *)
-        Thread.delay 2.1;
-        let cpu = float_of_string (get_pressure_some ~field:"avg10" ~kind:"cpu") in
-        let io = float_of_string (get_pressure_some ~field:"avg10" ~kind:"io") in
-        let mem = float_of_string (get_pressure_some ~field:"avg10" ~kind:"memory") in
-        let pressure = {cpu; io; mem} in
-        barrier ~prev:prev_pressure pressure;
-        loop pressure
+        barrier ~prev:(Limited_dequeue.last prevs) pressure;
+        loop (Limited_dequeue.add pressure prevs)
       end
     in
-    loop {cpu = 0.0; io = 0.0; mem = 0.0}
+    let default = {avg10 = 0.0; total = 0L; time = Unix.gettimeofday ()} in
+    let default = {cpu = default; io = default; mem = default} in
+    let limit = int_of_float (10.0 /. sleep_duration) in
+    loop (Limited_dequeue.singleton ~limit default)
   end ()
 
 let rec maybe_prune t queue =
