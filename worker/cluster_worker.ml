@@ -234,18 +234,20 @@ module Limited_queue : sig
   type 'a t
 
   val singleton : limit:int -> 'a -> 'a t
-  val add : 'a -> 'a t -> 'a t
+  val add : 'a -> 'a t -> unit
   val get : 'a t -> 'a
 end = struct
-  type 'a t = {limit : int; data : 'a list}
-  let singleton ~limit x = {limit; data = [x]}
+  type 'a t = {limit : int; data : 'a Queue.t}
+  let singleton ~limit x =
+    let data = Queue.create () in
+    Queue.push x data;
+    {limit; data}
   let add x {limit; data} =
-    if List.length data + 1 > limit then
-      {limit; data = List.tl data @ [x]}
-    else
-      {limit; data = data @ [x]}
+    if Queue.length data + 1 > limit then
+      ignore (Queue.pop data);
+    Queue.push x data
   let get self =
-    List.hd self.data
+    Queue.pop self.data
 end
 
 let setup_pressure_barrier t =
@@ -297,7 +299,8 @@ let setup_pressure_barrier t =
         let mem = delta_percent ~prev10:prev10.mem ~time:mem_time mem_total in
         let pressure = {cpu; io; mem} in
         barrier ~prev pressure;
-        loop (Limited_queue.add pressure prevs) pressure
+        Limited_queue.add pressure prevs;
+        loop prevs pressure
       end
     in
     let default = {avg10 = 0.0; total = 0L; time = Unix.gettimeofday ()} in
