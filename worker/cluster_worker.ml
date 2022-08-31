@@ -260,7 +260,7 @@ let setup_pressure_barrier t =
         io.avg10 > prev_io.avg10 +. 0.1 ||
         mem.avg10 > prev_mem.avg10 +. 0.1
       in
-      if cpu.avg10 < 1.0 && io.avg10 < 10.0 && mem.avg10 < 0.01 && not rapidly_increasing then
+      if cpu.avg10 < 1.0 && io.avg10 < 1.0 && mem.avg10 < 0.01 && not rapidly_increasing then
         Lwt_condition.signal t.pressure_barrier (Some pressure)
       else if t.in_use = 0 then
         Log.warn (fun f -> f "Pressure is high but no jobs are running... (cpu=%.2f io=%.2f memory=%.2f)" cpu.avg10 io.avg10 mem.avg10)
