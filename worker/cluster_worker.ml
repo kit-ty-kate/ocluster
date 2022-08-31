@@ -247,7 +247,7 @@ end = struct
       ignore (Queue.pop data);
     Queue.push x data
   let get self =
-    Queue.pop self.data
+    Queue.peek self.data
 end
 
 let setup_pressure_barrier t =
