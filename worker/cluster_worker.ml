@@ -99,7 +99,7 @@ type t = {
   allow_push : string list;            (* Repositories users can push to *)
   pressure_barrier : unit Lwt_condition.t;
   mutable pressure_barrier_stop : bool;
-  mutable jobs_waiting_for_pressure : int;
+  mutable pressure_barrier_state : [`Waiting | `Idle];
 }
 
 let docker_push ~switch ~log t hash { Cluster_api.Docker.Spec.target; auth } =
@@ -227,11 +227,11 @@ let get_pressure_some ~field ~kind =
     Log.warn (fun f -> f "Pressure: Could not find avg10."); "0"
 
 let wait_for_low_pressure t =
-  t.jobs_waiting_for_pressure <- t.jobs_waiting_for_pressure + 1;
-  Log.info (fun f -> f "Waiting for low pressure (%d)..." t.jobs_waiting_for_pressure);
+  Log.info (fun f -> f "Waiting for low pressure...");
+  t.pressure_barrier_state <- `Waiting;
   Lwt_condition.wait t.pressure_barrier >|= fun () ->
-  Log.info (fun f -> f "Low pressure reached...");
-  t.jobs_waiting_for_pressure <- t.jobs_waiting_for_pressure - 1
+  t.pressure_barrier_state <- `Idle;
+  Log.info (fun f -> f "Low pressure reached...")
 
 (* TODO: Make it an external library? *)
 module Limited_queue : sig
@@ -279,12 +279,14 @@ let with_pressure_barrier t =
         io.avg10 > prev_io.avg10 +. 0.1 ||
         mem.avg10 > prev_mem.avg10 +. 0.1
       in
-      if cpu.avg10 < 1.0 && io.avg10 < 1.0 && mem.avg10 < 0.01 && not rapidly_increasing then begin
-        if t.jobs_waiting_for_pressure > 0 then begin
-          Log.info (fun f -> f "Pressure after barrier: cpu=%.2f io=%.2f memory=%.2f" cpu.avg10 io.avg10 mem.avg10);
-          Lwt_unix.send_notification notification;
+      if cpu.avg10 < 1.0 && io.avg10 < 1.0 && mem.avg10 < 0.01 && not rapidly_increasing then
+        begin match t.pressure_barrier_state with
+        | `Waiting ->
+            Log.info (fun f -> f "Pressure after barrier: cpu=%.2f io=%.2f memory=%.2f" cpu.avg10 io.avg10 mem.avg10);
+            Lwt_unix.send_notification notification;
+        | `Idle -> ()
         end
-      end else if t.in_use = 0 then
+      else if t.in_use = 0 then
         Log.warn (fun f -> f "Pressure is high but no jobs are running... (cpu=%.2f io=%.2f memory=%.2f)" cpu.avg10 io.avg10 mem.avg10)
       else
         Log.info (fun f -> f "Pressure before barrier: cpu=%.2f io=%.2f memory=%.2f" cpu.avg10 io.avg10 mem.avg10)
@@ -623,7 +625,7 @@ let run ?switch ?build ?(allow_push=[]) ?prune_threshold ?obuilder ~update ~capa
     allow_push;
     pressure_barrier = Lwt_condition.create ();
     pressure_barrier_stop = false;
-    jobs_waiting_for_pressure = 0;
+    pressure_barrier_state = `Idle;
   } in
   with_pressure_barrier t @@ fun () ->
   Lwt_switch.add_hook_or_exec switch (fun () ->
