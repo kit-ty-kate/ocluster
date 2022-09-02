@@ -74,18 +74,6 @@ type build =
   job_spec ->
   (string, [`Cancelled | `Msg of string]) Lwt_result.t
 
-type pressure_value = {
-  avg10 : float;
-  total : Int64.t;
-  time : float;
-}
-
-type pressure = {
-  cpu : pressure_value;
-  io : pressure_value;
-  mem : pressure_value;
-}
-
 type t = {
   name : string;
   context : Context.t;
@@ -97,8 +85,9 @@ type t = {
   cond : unit Lwt_condition.t;         (* Fires when a build finishes (or switch turned off) *)
   mutable cancel : unit -> unit;       (* Called if switch is turned off *)
   allow_push : string list;            (* Repositories users can push to *)
-  pressure_barrier : pressure option Lwt_condition.t;
+  pressure_barrier : unit Lwt_condition.t;
   mutable pressure_barrier_stop : bool;
+  mutable jobs_waiting_for_pressure : int;
 }
 
 let docker_push ~switch ~log t hash { Cluster_api.Docker.Spec.target; auth } =
@@ -226,9 +215,10 @@ let get_pressure_some ~field ~kind =
     Log.warn (fun f -> f "Pressure: Could not find avg10."); "0"
 
 let wait_for_low_pressure t =
-  Log.info (fun f -> f "Waiting for low pressure...");
-  Lwt_condition.wait t.pressure_barrier >|= Option.iter @@ fun {cpu; io; mem} ->
-  Log.info (fun f -> f "Pressure after barrier: cpu=%.2f io=%.2f memory=%.2f" cpu.avg10 io.avg10 mem.avg10)
+  t.jobs_waiting_for_pressure <- succ t.jobs_waiting_for_pressure;
+  Log.info (fun f -> f "Waiting for low pressure (%d)..." t.jobs_waiting_for_pressure);
+  Lwt_condition.wait t.pressure_barrier >|= fun () ->
+  t.jobs_waiting_for_pressure <- pred t.jobs_waiting_for_pressure
 
 (* TODO: Make it an external library? *)
 module Limited_queue : sig
@@ -251,19 +241,29 @@ end = struct
     Queue.peek self.data
 end
 
+let with_lwt_notification f cont =
+  let notification = Lwt_unix.make_notification f in
+  Fun.protect
+    ~finally:(fun () -> Lwt_unix.stop_notification notification)
+    (fun () -> cont notification)
+
+type pressure_value = {
+  avg10 : float;
+  total : Int64.t;
+  time : float;
+}
+
+type pressure = {
+  cpu : pressure_value;
+  io : pressure_value;
+  mem : pressure_value;
+}
+
 let setup_pressure_barrier t =
   let pressure_exists = Sys.file_exists "/proc/pressure" in (* For example, it does not exist on s390x *)
-  let signal_pressure_barrier : pressure option -> unit =
-    (* Simplified and faster version of https://github.com/ocsigen/lwt/blob/01eb4583f1f3a782351621248c7cb705056fb63e/src/unix/lwt_preemptive.ml#L211 *)
-    let current_pressure = ref None in
-    let notification = Lwt_unix.make_notification (fun () -> Lwt_condition.signal t.pressure_barrier !current_pressure) in
-    fun pressure ->
-      (* This is wrong and should be added to a mutexed queue but pressure reading are only there for the log so we can afford to print something out-of-sync *)
-      current_pressure := pressure;
-      Lwt_unix.send_notification notification
-  in
+  with_lwt_notification (fun () -> Lwt_condition.signal t.pressure_barrier ()) @@ fun notification ->
   Thread.create begin fun () : unit ->
-    let barrier ~prev:{cpu = prev_cpu; io = prev_io; mem = prev_mem} ({cpu; io; mem} as pressure) =
+    let barrier ~prev:{cpu = prev_cpu; io = prev_io; mem = prev_mem} {cpu; io; mem} =
       let rapidly_increasing =
         (* is increasing more than 0.1% *)
         cpu.avg10 > prev_cpu.avg10 +. 0.1 ||
@@ -271,7 +271,10 @@ let setup_pressure_barrier t =
         mem.avg10 > prev_mem.avg10 +. 0.1
       in
       if cpu.avg10 < 1.0 && io.avg10 < 1.0 && mem.avg10 < 0.01 && not rapidly_increasing then
-        signal_pressure_barrier (Some pressure)
+        if t.jobs_waiting_for_pressure > 0 then begin
+          Log.info (fun f -> f "Pressure after barrier: cpu=%.2f io=%.2f memory=%.2f" cpu.avg10 io.avg10 mem.avg10);
+          Lwt_unix.send_notification notification;
+        end
       else if t.in_use = 0 then
         Log.warn (fun f -> f "Pressure is high but no jobs are running... (cpu=%.2f io=%.2f memory=%.2f)" cpu.avg10 io.avg10 mem.avg10)
       else
@@ -283,7 +286,7 @@ let setup_pressure_barrier t =
         ()
       else if not pressure_exists then begin
         Thread.delay sleep_duration;
-        signal_pressure_barrier None;
+        Lwt_unix.send_notification notification;
         loop prevs prev
       end else begin
         let delta_percent ~prev10 ~time total =
@@ -611,6 +614,7 @@ let run ?switch ?build ?(allow_push=[]) ?prune_threshold ?obuilder ~update ~capa
     allow_push;
     pressure_barrier = Lwt_condition.create ();
     pressure_barrier_stop = false;
+    jobs_waiting_for_pressure = 0;
   } in
   let pressure_barrier_thread = setup_pressure_barrier t in
   let finalize ~finalizer f = Lwt.finalize f finalizer in
