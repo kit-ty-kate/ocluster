@@ -227,10 +227,10 @@ let get_pressure_some ~field ~kind =
     Log.warn (fun f -> f "Pressure: Could not find avg10."); "0"
 
 let wait_for_low_pressure t =
-  t.jobs_waiting_for_pressure <- succ t.jobs_waiting_for_pressure;
+  t.jobs_waiting_for_pressure <- t.jobs_waiting_for_pressure + 1;
   Log.info (fun f -> f "Waiting for low pressure (%d)..." t.jobs_waiting_for_pressure);
   Lwt_condition.wait t.pressure_barrier >|= fun () ->
-  t.jobs_waiting_for_pressure <- pred t.jobs_waiting_for_pressure
+  t.jobs_waiting_for_pressure <- t.jobs_waiting_for_pressure - 1
 
 (* TODO: Make it an external library? *)
 module Limited_queue : sig
