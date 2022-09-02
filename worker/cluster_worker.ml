@@ -251,17 +251,17 @@ end = struct
     Queue.peek self.data
 end
 
-let run_in_main_no_wait : (unit -> unit) -> unit =
-  (* Simplified and faster version of https://github.com/ocsigen/lwt/blob/01eb4583f1f3a782351621248c7cb705056fb63e/src/unix/lwt_preemptive.ml#L211 *)
-  let job = ref Fun.id in
-  let notification = Lwt_unix.make_notification (fun () -> !job ()) in
-  fun f ->
-    job := f;
-    Lwt_unix.send_notification notification;
-    job := Fun.id (* Avoids memory leak *)
-
 let setup_pressure_barrier t =
   let pressure_exists = Sys.file_exists "/proc/pressure" in (* For example, it does not exist on s390x *)
+  let signal_pressure_barrier : pressure option -> unit =
+    (* Simplified and faster version of https://github.com/ocsigen/lwt/blob/01eb4583f1f3a782351621248c7cb705056fb63e/src/unix/lwt_preemptive.ml#L211 *)
+    let current_pressure = ref None in
+    let notification = Lwt_unix.make_notification (fun () -> Lwt_condition.signal t.pressure_barrier !current_pressure) in
+    fun pressure ->
+      (* This is wrong and should be added to a mutexed queue but pressure reading are only there for the log so we can afford to print something out-of-sync *)
+      current_pressure := pressure;
+      Lwt_unix.send_notification notification
+  in
   Thread.create begin fun () : unit ->
     let barrier ~prev:{cpu = prev_cpu; io = prev_io; mem = prev_mem} ({cpu; io; mem} as pressure) =
       let rapidly_increasing =
@@ -271,7 +271,7 @@ let setup_pressure_barrier t =
         mem.avg10 > prev_mem.avg10 +. 0.1
       in
       if cpu.avg10 < 1.0 && io.avg10 < 1.0 && mem.avg10 < 0.01 && not rapidly_increasing then
-        run_in_main_no_wait (fun () -> Lwt_condition.signal t.pressure_barrier (Some pressure))
+        signal_pressure_barrier (Some pressure)
       else if t.in_use = 0 then
         Log.warn (fun f -> f "Pressure is high but no jobs are running... (cpu=%.2f io=%.2f memory=%.2f)" cpu.avg10 io.avg10 mem.avg10)
       else
@@ -283,7 +283,7 @@ let setup_pressure_barrier t =
         ()
       else if not pressure_exists then begin
         Thread.delay sleep_duration;
-        run_in_main_no_wait (fun () -> Lwt_condition.signal t.pressure_barrier None);
+        signal_pressure_barrier None;
         loop prevs prev
       end else begin
         let delta_percent ~prev10 ~time total =
