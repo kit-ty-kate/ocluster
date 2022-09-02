@@ -251,6 +251,24 @@ end = struct
     Queue.peek self.data
 end
 
+let run_in_main_no_wait =
+  (* Simplified and faster version of https://github.com/ocsigen/lwt/blob/01eb4583f1f3a782351621248c7cb705056fb63e/src/unix/lwt_preemptive.ml#L211 *)
+  let jobs = Queue.create () in
+  let mutex = Mutex.create () in
+  let notification =
+    Lwt_unix.make_notification
+      (fun () ->
+         Mutex.lock mutex;
+         let thunk = Queue.take jobs in
+         Mutex.unlock mutex;
+         thunk ())
+  in
+  fun f ->
+    Mutex.lock mutex;
+    Queue.add f jobs;
+    Mutex.unlock mutex;
+    Lwt_unix.send_notification notification
+
 let setup_pressure_barrier t =
   let pressure_exists = Sys.file_exists "/proc/pressure" in (* For example, it does not exist on s390x *)
   Thread.create begin fun () : unit ->
@@ -262,7 +280,7 @@ let setup_pressure_barrier t =
         mem.avg10 > prev_mem.avg10 +. 0.1
       in
       if cpu.avg10 < 1.0 && io.avg10 < 1.0 && mem.avg10 < 0.01 && not rapidly_increasing then
-        Lwt_preemptive.run_in_main (fun () -> Lwt_condition.signal t.pressure_barrier (Some pressure); Lwt.return_unit)
+        run_in_main_no_wait (fun () -> Lwt_condition.signal t.pressure_barrier (Some pressure))
       else if t.in_use = 0 then
         Log.warn (fun f -> f "Pressure is high but no jobs are running... (cpu=%.2f io=%.2f memory=%.2f)" cpu.avg10 io.avg10 mem.avg10)
       else
@@ -274,7 +292,7 @@ let setup_pressure_barrier t =
         ()
       else if not pressure_exists then begin
         Thread.delay sleep_duration;
-        Lwt_preemptive.run_in_main (fun () -> Lwt_condition.signal t.pressure_barrier None; Lwt.return_unit);
+        run_in_main_no_wait (fun () -> Lwt_condition.signal t.pressure_barrier None);
         loop prevs prev
       end else begin
         let delta_percent ~prev10 ~time total =
