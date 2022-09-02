@@ -257,7 +257,7 @@ end
 let with_lwt_notification f cont =
   let notification = Lwt_unix.make_notification f in
   Fun.protect
-    ~finally:(fun () -> Lwt_unix.stop_notification notification)
+    ~finally:(fun () -> (*Lwt_unix.stop_notification notification*) ())
     (fun () -> cont notification)
 
 let with_thread t cont f =
