@@ -251,23 +251,14 @@ end = struct
     Queue.peek self.data
 end
 
-let run_in_main_no_wait =
+let run_in_main_no_wait : (unit -> unit) -> unit =
   (* Simplified and faster version of https://github.com/ocsigen/lwt/blob/01eb4583f1f3a782351621248c7cb705056fb63e/src/unix/lwt_preemptive.ml#L211 *)
-  let jobs = Queue.create () in
-  let mutex = Mutex.create () in
-  let notification =
-    Lwt_unix.make_notification
-      (fun () ->
-         Mutex.lock mutex;
-         let thunk = Queue.take jobs in
-         Mutex.unlock mutex;
-         thunk ())
-  in
+  let job = ref Fun.id in
+  let notification = Lwt_unix.make_notification (fun () -> !job ()) in
   fun f ->
-    Mutex.lock mutex;
-    Queue.add f jobs;
-    Mutex.unlock mutex;
-    Lwt_unix.send_notification notification
+    job := f;
+    Lwt_unix.send_notification notification;
+    job := Fun.id (* Avoids memory leak *)
 
 let setup_pressure_barrier t =
   let pressure_exists = Sys.file_exists "/proc/pressure" in (* For example, it does not exist on s390x *)
