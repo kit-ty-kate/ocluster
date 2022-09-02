@@ -259,10 +259,17 @@ type pressure = {
   mem : pressure_value;
 }
 
-let setup_pressure_barrier t =
+let with_thread t f cont =
+  let thread = Thread.create f () in
+  Lwt.finalize cont @@ fun () ->
+  t.pressure_barrier_stop <- true;
+  Thread.join thread;
+  Lwt.return_unit
+
+let with_pressure_barrier t =
   let pressure_exists = Sys.file_exists "/proc/pressure" in (* For example, it does not exist on s390x *)
   with_lwt_notification (fun () -> Lwt_condition.signal t.pressure_barrier ()) @@ fun notification ->
-  Thread.create begin fun () : unit ->
+  with_thread t begin fun () : unit ->
     let barrier ~prev:{cpu = prev_cpu; io = prev_io; mem = prev_mem} {cpu; io; mem} =
       let rapidly_increasing =
         (* is increasing more than 0.1% *)
@@ -320,7 +327,7 @@ let setup_pressure_barrier t =
     let default = {cpu = default; io = default; mem = default} in
     let limit = int_of_float (10.0 /. sleep_duration) in
     loop (Limited_queue.singleton ~limit default) default
-  end ()
+  end
 
 let rec maybe_prune t queue =
   check_docker_partition t >>= function
@@ -616,13 +623,7 @@ let run ?switch ?build ?(allow_push=[]) ?prune_threshold ?obuilder ~update ~capa
     pressure_barrier_stop = false;
     jobs_waiting_for_pressure = 0;
   } in
-  let pressure_barrier_thread = setup_pressure_barrier t in
-  let finalize ~finalizer f = Lwt.finalize f finalizer in
-  finalize ~finalizer:(fun () ->
-    t.pressure_barrier_stop <- true;
-    Thread.join pressure_barrier_thread;
-    Lwt.return_unit
-  ) @@ fun () ->
+  with_pressure_barrier t @@ fun () ->
   Lwt_switch.add_hook_or_exec switch (fun () ->
       Log.info (fun f -> f "Switch turned off. Will shut down.");
       t.cancel ();
