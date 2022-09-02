@@ -260,7 +260,7 @@ let with_lwt_notification f cont =
     ~finally:(fun () -> Lwt_unix.stop_notification notification)
     (fun () -> cont notification)
 
-let with_thread t f cont =
+let with_thread t cont f =
   let thread = Thread.create f () in
   Lwt.finalize cont begin fun () ->
     t.pressure_barrier_stop <- true;
@@ -268,10 +268,10 @@ let with_thread t f cont =
     Lwt.return_unit
   end
 
-let with_pressure_barrier t =
+let with_pressure_barrier t cont =
   let pressure_exists = Sys.file_exists "/proc/pressure" in (* For example, it does not exist on s390x *)
   with_lwt_notification (fun () -> Lwt_condition.signal t.pressure_barrier ()) @@ fun notification ->
-  with_thread t begin fun () : unit ->
+  with_thread t cont begin fun () : unit ->
     let barrier ~prev:{cpu = prev_cpu; io = prev_io; mem = prev_mem} {cpu; io; mem} =
       let rapidly_increasing =
         (* is increasing more than 0.1% *)
