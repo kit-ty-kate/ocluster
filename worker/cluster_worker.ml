@@ -613,6 +613,12 @@ let run ?switch ?build ?(allow_push=[]) ?prune_threshold ?obuilder ~update ~capa
     pressure_barrier_stop = false;
   } in
   let pressure_barrier_thread = setup_pressure_barrier t in
+  let finalize ~finalizer f = Lwt.finalize f finalizer in
+  finalize ~finalizer:(fun () ->
+    t.pressure_barrier_stop <- true;
+    Thread.join pressure_barrier_thread;
+    Lwt.return_unit
+  ) @@ fun () ->
   Lwt_switch.add_hook_or_exec switch (fun () ->
       Log.info (fun f -> f "Switch turned off. Will shut down.");
       t.cancel ();
@@ -652,11 +658,8 @@ let run ?switch ?build ?(allow_push=[]) ?prune_threshold ?obuilder ~update ~capa
          Lwt_unix.sleep delay >>= reconnect
       )
   in
-  reconnect () >>= begin function
+  reconnect () >>= function
   | `Cancelled -> Lwt.return_unit
   | `Crash ex -> Lwt.fail ex
-  end >|= fun () ->
-  t.pressure_barrier_stop <- true;
-  Thread.join pressure_barrier_thread
 
 module Obuilder_config = Obuilder_build.Config
