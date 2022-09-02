@@ -74,6 +74,18 @@ type build =
   job_spec ->
   (string, [`Cancelled | `Msg of string]) Lwt_result.t
 
+type pressure_value = {
+  avg10 : float;
+  total : Int64.t;
+  time : float;
+}
+
+type pressure = {
+  cpu : pressure_value;
+  io : pressure_value;
+  mem : pressure_value;
+}
+
 type t = {
   name : string;
   context : Context.t;
@@ -247,24 +259,13 @@ let with_lwt_notification f cont =
     ~finally:(fun () -> Lwt_unix.stop_notification notification)
     (fun () -> cont notification)
 
-type pressure_value = {
-  avg10 : float;
-  total : Int64.t;
-  time : float;
-}
-
-type pressure = {
-  cpu : pressure_value;
-  io : pressure_value;
-  mem : pressure_value;
-}
-
 let with_thread t f cont =
   let thread = Thread.create f () in
-  Lwt.finalize cont @@ fun () ->
-  t.pressure_barrier_stop <- true;
-  Thread.join thread;
-  Lwt.return_unit
+  Lwt.finalize cont begin fun () ->
+    t.pressure_barrier_stop <- true;
+    Thread.join thread;
+    Lwt.return_unit
+  end
 
 let with_pressure_barrier t =
   let pressure_exists = Sys.file_exists "/proc/pressure" in (* For example, it does not exist on s390x *)
@@ -277,12 +278,12 @@ let with_pressure_barrier t =
         io.avg10 > prev_io.avg10 +. 0.1 ||
         mem.avg10 > prev_mem.avg10 +. 0.1
       in
-      if cpu.avg10 < 1.0 && io.avg10 < 1.0 && mem.avg10 < 0.01 && not rapidly_increasing then
+      if cpu.avg10 < 1.0 && io.avg10 < 1.0 && mem.avg10 < 0.01 && not rapidly_increasing then begin
         if t.jobs_waiting_for_pressure > 0 then begin
           Log.info (fun f -> f "Pressure after barrier: cpu=%.2f io=%.2f memory=%.2f" cpu.avg10 io.avg10 mem.avg10);
           Lwt_unix.send_notification notification;
         end
-      else if t.in_use = 0 then
+      end else if t.in_use = 0 then
         Log.warn (fun f -> f "Pressure is high but no jobs are running... (cpu=%.2f io=%.2f memory=%.2f)" cpu.avg10 io.avg10 mem.avg10)
       else
         Log.info (fun f -> f "Pressure before barrier: cpu=%.2f io=%.2f memory=%.2f" cpu.avg10 io.avg10 mem.avg10)
