@@ -226,6 +226,7 @@ let get_pressure_some ~field ~kind =
     Log.warn (fun f -> f "Pressure: Could not find avg10."); "0"
 
 let wait_for_low_pressure t =
+  Log.info (fun f -> f "Waiting for low pressure...");
   Lwt_condition.wait t.pressure_barrier >|= Option.iter @@ fun {cpu; io; mem} ->
   Log.info (fun f -> f "Pressure after barrier: cpu=%.2f io=%.2f memory=%.2f" cpu.avg10 io.avg10 mem.avg10)
 
@@ -261,7 +262,7 @@ let setup_pressure_barrier t =
         mem.avg10 > prev_mem.avg10 +. 0.1
       in
       if cpu.avg10 < 1.0 && io.avg10 < 1.0 && mem.avg10 < 0.01 && not rapidly_increasing then
-        Lwt_condition.signal t.pressure_barrier (Some pressure)
+        Lwt_preemptive.run_in_main (fun () -> Lwt_condition.signal t.pressure_barrier (Some pressure); Lwt.return_unit)
       else if t.in_use = 0 then
         Log.warn (fun f -> f "Pressure is high but no jobs are running... (cpu=%.2f io=%.2f memory=%.2f)" cpu.avg10 io.avg10 mem.avg10)
       else
@@ -273,7 +274,7 @@ let setup_pressure_barrier t =
         ()
       else if not pressure_exists then begin
         Thread.delay sleep_duration;
-        Lwt_condition.signal t.pressure_barrier None;
+        Lwt_preemptive.run_in_main (fun () -> Lwt_condition.signal t.pressure_barrier None; Lwt.return_unit);
         loop prevs prev
       end else begin
         let delta_percent ~prev10 ~time total =
