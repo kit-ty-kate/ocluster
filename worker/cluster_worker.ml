@@ -230,6 +230,7 @@ let wait_for_low_pressure t =
   t.jobs_waiting_for_pressure <- t.jobs_waiting_for_pressure + 1;
   Log.info (fun f -> f "Waiting for low pressure (%d)..." t.jobs_waiting_for_pressure);
   Lwt_condition.wait t.pressure_barrier >|= fun () ->
+  Log.info (fun f -> f "Low pressure reached...");
   t.jobs_waiting_for_pressure <- t.jobs_waiting_for_pressure - 1
 
 (* TODO: Make it an external library? *)
