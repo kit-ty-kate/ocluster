@@ -332,6 +332,9 @@ let with_pressure_barrier t cont =
     let default = {cpu = default; io = default; mem = default} in
     let limit () =
       let avg_over_n_sec =
+        (* The average pressure will be calculated over N seconds,
+           where N is between 10 and 300 depending (exponentially)
+           on how many jobs are currently running *)
         let min = 10.0 and max = 300.0 in
         min *. (max /. min) ** (float_of_int t.in_use /. float_of_int t.capacity)
       in
