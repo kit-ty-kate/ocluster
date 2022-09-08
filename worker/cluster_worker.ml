@@ -247,8 +247,9 @@ end = struct
     Queue.push x data;
     {limit; data}
   let add x {limit; data} =
-    if Queue.length data + 1 > limit () then
+    for _ = limit () to Queue.length data do
       ignore (Queue.pop data);
+    done;
     Queue.push x data
   let get self =
     Queue.peek self.data
