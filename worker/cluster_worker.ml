@@ -237,17 +237,17 @@ let wait_for_low_pressure t =
 module Limited_queue : sig
   type 'a t
 
-  val singleton : limit:int -> 'a -> 'a t
+  val singleton : limit:(unit -> int) -> 'a -> 'a t
   val add : 'a -> 'a t -> unit
   val get : 'a t -> 'a
 end = struct
-  type 'a t = {limit : int; data : 'a Queue.t}
+  type 'a t = {limit : unit -> int; data : 'a Queue.t}
   let singleton ~limit x =
     let data = Queue.create () in
     Queue.push x data;
     {limit; data}
   let add x {limit; data} =
-    if Queue.length data + 1 > limit then
+    if Queue.length data + 1 > limit () then
       ignore (Queue.pop data);
     Queue.push x data
   let get self =
@@ -330,7 +330,13 @@ let with_pressure_barrier t cont =
     in
     let default = {avg10 = 0.0; total = 0L; time = Unix.gettimeofday ()} in
     let default = {cpu = default; io = default; mem = default} in
-    let limit = int_of_float (10.0 /. sleep_duration) in
+    let limit () =
+      let avg_over_n_sec =
+        let min = 10.0 and max = 300.0 in
+        min *. (max /. min) ** (float_of_int t.in_use /. float_of_int t.capacity)
+      in
+      int_of_float (avg_over_n_sec /. sleep_duration)
+    in
     loop (Limited_queue.singleton ~limit default) default
   end
 
