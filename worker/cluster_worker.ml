@@ -238,22 +238,22 @@ let get_free_memory () =
     | Some total, Some avail -> (total, avail)
     | total, avail ->
         match String.split_on_char ' ' (Stdlib.input_line ic) |> List.filter ((<>) "") with
-        | ["MemTotal:";num;"kB"] -> read_lines ic (Some (Int64.of_string num), avail)
-        | ["MemAvailable:";num;"kB"] -> read_lines ic (total, Some (Int64.of_string num))
+        | ["MemTotal:";num;"kB"] -> read_lines ic (Some (float_of_string num), avail)
+        | ["MemAvailable:";num;"kB"] -> read_lines ic (total, Some (float_of_string num))
         | _ -> read_lines ic (total, avail)
   in
   try
     let ic = open_in "/proc/meminfo" in
     Fun.protect ~finally:(fun () -> close_in ic) begin fun () ->
       let total, avail = read_lines ic (None, None) in
-      Int64.to_float (Int64.div avail total)
+      avail /. total
     end
   with
   | Sys_error _ ->
     Log.warn (fun f -> f "Free-Mem: Could not open the meminfo file."); 0.0
   | End_of_file ->
     Log.warn (fun f -> f "Free-Mem: Could not get the content."); 0.0
-  | Failure _ -> (* raised by Int64.of_string *)
+  | Failure _ -> (* raised by float_of_string *)
     Log.warn (fun f -> f "Free-Mem: Could not parse file."); 0.0
 
 (* TODO: Make it an external library? *)
