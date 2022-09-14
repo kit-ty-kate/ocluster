@@ -221,10 +221,10 @@ let get_pressure_some ~field ~kind =
     Log.warn (fun f -> f "Pressure: Could not open the pressure file for '%s'." kind); "0"
   | End_of_file ->
     Log.warn (fun f -> f "Pressure: Could not get the 'some' line."); "0"
-  | Failure _ -> (* raised manually or by float_of_string *)
+  | Failure _ -> (* raised manually *)
     Log.warn (fun f -> f "Pressure: Could not parse file."); "0"
   | Not_found ->
-    Log.warn (fun f -> f "Pressure: Could not find avg10."); "0"
+    Log.warn (fun f -> f "Pressure: Could not find total."); "0"
 
 let wait_for_low_pressure t =
   Log.info (fun f -> f "Waiting for low pressure...");
@@ -232,6 +232,29 @@ let wait_for_low_pressure t =
   Lwt_condition.wait t.pressure_barrier >|= fun () ->
   t.pressure_barrier_state <- `Idle;
   Log.info (fun f -> f "Low pressure reached...")
+
+let get_free_memory () =
+  let rec read_lines ic = function
+    | Some total, Some avail -> (total, avail)
+    | total, avail ->
+        match String.split_on_char ' ' (Stdlib.input_line ic) |> List.filter ((<>) "") with
+        | ["MemTotal:";num;"kB"] -> read_lines ic (Some (Int64.of_string num), avail)
+        | ["MemAvailable:";num;"kB"] -> read_lines ic (total, Some (Int64.of_string num))
+        | _ -> read_lines ic (total, avail)
+  in
+  try
+    let ic = open_in "/proc/meminfo" in
+    Fun.protect ~finally:(fun () -> close_in ic) begin fun () ->
+      let total, avail = read_lines ic (None, None) in
+      Int64.to_float (Int64.div avail total)
+    end
+  with
+  | Sys_error _ ->
+    Log.warn (fun f -> f "Free-Mem: Could not open the meminfo file."); 0.0
+  | End_of_file ->
+    Log.warn (fun f -> f "Free-Mem: Could not get the content."); 0.0
+  | Failure _ -> (* raised by Int64.of_string *)
+    Log.warn (fun f -> f "Free-Mem: Could not parse file."); 0.0
 
 (* TODO: Make it an external library? *)
 module Limited_queue : sig
@@ -274,24 +297,24 @@ let with_pressure_barrier t cont =
   let pressure_exists = Sys.file_exists "/proc/pressure" in (* For example, it does not exist on s390x *)
   with_lwt_notification (fun () -> Lwt_condition.signal t.pressure_barrier ()) @@ fun notification ->
   with_thread t cont begin fun () : unit ->
-    let barrier ~prev:{cpu = prev_cpu; io = prev_io; mem = prev_mem} {cpu; io; mem} =
+    let barrier ~free_mem ~prev:{cpu = prev_cpu; io = prev_io; mem = prev_mem} {cpu; io; mem} =
       let rapidly_increasing =
         (* is increasing more than 0.1% *)
         cpu.avg10 > prev_cpu.avg10 +. 0.1 ||
         io.avg10 > prev_io.avg10 +. 0.1 ||
         mem.avg10 > prev_mem.avg10 +. 0.1
       in
-      if cpu.avg10 < 1.0 && io.avg10 < 1.0 && mem.avg10 < 0.01 && not rapidly_increasing then
+      if cpu.avg10 < 1.0 && io.avg10 < 1.0 && mem.avg10 < 0.01 && not rapidly_increasing && free_mem > 0.5 then
         begin match t.pressure_barrier_state with
         | `Waiting ->
-            Log.info (fun f -> f "Pressure after barrier: cpu=%.2f io=%.2f memory=%.2f" cpu.avg10 io.avg10 mem.avg10);
+            Log.info (fun f -> f "Pressure after barrier: cpu=%.2f io=%.2f memory=%.2f free-memory=%.2f" cpu.avg10 io.avg10 mem.avg10 free_mem);
             Lwt_unix.send_notification notification;
         | `Idle -> ()
         end
       else if t.in_use = 0 then
-        Log.warn (fun f -> f "Pressure is high but no jobs are running... (cpu=%.2f io=%.2f memory=%.2f)" cpu.avg10 io.avg10 mem.avg10)
+        Log.warn (fun f -> f "Pressure is high but no jobs are running... (cpu=%.2f io=%.2f memory=%.2f, free-memory=%.2f)" cpu.avg10 io.avg10 mem.avg10 free_mem)
       else
-        Log.info (fun f -> f "Pressure before barrier: cpu=%.2f io=%.2f memory=%.2f" cpu.avg10 io.avg10 mem.avg10)
+        Log.info (fun f -> f "Pressure before barrier: cpu=%.2f io=%.2f memory=%.2f free-memory=%.2f" cpu.avg10 io.avg10 mem.avg10 free_mem)
     in
     let sleep_duration = 0.1 in
     let rec loop prevs prev =
@@ -324,7 +347,8 @@ let with_pressure_barrier t cont =
         let io = delta_percent ~prev10:prev10.io ~time:io_time io_total in
         let mem = delta_percent ~prev10:prev10.mem ~time:mem_time mem_total in
         let pressure = {cpu; io; mem} in
-        barrier ~prev pressure;
+        let free_mem = get_free_memory () in
+        barrier ~free_mem ~prev pressure;
         Limited_queue.add pressure prevs;
         loop prevs pressure
       end
